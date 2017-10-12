@@ -70,7 +70,6 @@ object getFeature3 {
     val training = getPredict.getTrainData(actionPath,rootpath,watchDay,labelperiod,appKey,0.5)
     getPredict.RFModel(training,numTree,treeDepth)
   }
-
   def deleteFile(path: String) : Unit = {
     // delete files
     import org.apache.hadoop.conf.Configuration
