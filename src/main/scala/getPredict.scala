@@ -3,6 +3,8 @@ package com.app
 import org.apache.spark.sql.functions._
 import java.sql.Timestamp
 import java.text.SimpleDateFormat
+import org.apache.commons.lang3.time.DateUtils
+
 import org.apache.spark.sql.types._
 import org.apache.spark._
 import org.apache.spark.ml.Pipeline
@@ -12,27 +14,30 @@ import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorIndexer}
 import org.apache.spark.ml.param.ParamMap
 import org.apache.spark.mllib.evaluation.MulticlassMetrics
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
-import org.apache.spark.sql.Row
+import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.ml.feature.MinMaxScaler
 
+
 object getPredict {
+
+  //init the spark
+  val conf = new SparkConf()
+    .setMaster("yarn-cluster")
+    .setAppName("feature data")
+    .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+  val sc = new SparkContext(conf)
+  sc.setLogLevel("WARN")
+  val sqlContext = new SQLContext(sc)
+
   val fmt: SimpleDateFormat = new java.text.SimpleDateFormat("yyyy/MM/dd")
 
-
   def main(args: Array[String]):Unit = {
-    /* args(0): startDay,"2017/07/ -/"
-    *
-     */
-    //init the spark
-    val conf = new SparkConf()
-      .setMaster("yarn-cluster")
-      .setAppName("feature data")
-      .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-    val sc = new SparkContext(conf)
-    sc.setLogLevel("WARN")
-    val sqlContext = new org.apache.spark.sql.SQLContext(sc)
-    import sqlContext.implicits._
+    /**
+      * actionPath
+      * rootpath
+      */
+
 //    val featurepath2 ="/datalab/user/frank.zhang/data/feature/action/201706MA"
 //
 //    val feat2 =sqlContext.read.parquet(featurepath)
@@ -40,14 +45,16 @@ object getPredict {
     // // val labelData = sqlContext.read.parquet(labelpath)
 //    val appSavePath ="/datalab/user/frank.zhang/data/feature/app/201706"
     val actionPath = args(0)
-    val appSavePath = args(1)
-    val labelPath = args(2)
+    val rootpath = args(1)
+    val watchDay = args(2)
     val numTree = args(3).toInt
     val treeDepth = args(4).toInt
 
+    val labelperiod = 7
+    val appKey = "323BE90BCA2213A07D18FE935A6BA9E5"
 
-    val training = getTrainData(sqlContext,actionPath,appSavePath,labelPath)
-    RFModel(sc,training,numTree,treeDepth)
+    val training = getPredict.getTrainData(actionPath,rootpath,watchDay,labelperiod,appKey)
+    RFModel(training,numTree,treeDepth)
 
   }
   def deleteFile(path: String) : Unit = {
@@ -60,7 +67,8 @@ object getPredict {
       hdfs.delete(new Path(path), true)//true: delete files recursively
     }
   }
-  /**seve the DataFrame to the specified path
+  /**
+    * save the DataFrame to the specified path
     *detect the path is exists when exists delete it. then save the data
     */
   def saveData(df:org.apache.spark.sql.DataFrame,path:String):Unit ={
@@ -75,33 +83,30 @@ object getPredict {
     df.write.format("parquet").save(path)
   }
   // load DataFrame format data from paequet files
-  def loadData(sqlContext:org.apache.spark.sql.SQLContext,readPath: String):org.apache.spark.sql.DataFrame ={
+  def loadData(sqlContext: SQLContext,readPath: String):org.apache.spark.sql.DataFrame ={
     val df = sqlContext.read.parquet(readPath)
     df
   }
-  def getTrainData(sqlContext: org.apache.spark.sql.SQLContext,featurePath:String,apppath : String,labelPath:String,ratio :Double = 0.1):org.apache.spark.sql.DataFrame = {
+
+  def getTrainData(featurePath:String,rootpath:String,watchDay:String,period : Integer,appKey : String,ratio :Double = 0.1):org.apache.spark.sql.DataFrame = {
     import sqlContext.implicits._
     // load features form save data
     // val featurePath ="/datalab/user/frank.zhang/data/feature/month4"
     val featData = sqlContext.read.parquet(featurePath).drop("fMin").drop("tMin")
-    val appInfo = sqlContext.read.parquet(apppath)
-    val newFeat =featData.join(appInfo,Seq("tdid"),"left").na.drop
     // //load features from calculate,slow
     // val rawpath="/datalab/user/jiesheng.ye/data/zhixian.zheng.new/2017/04/*/"
     // val featData = extractFeaturesAll(rawpath)
-
-    // val labelPath ="/datalab/user/frank.zhang/data/label/label0501"
-    val labelData = sqlContext.read.parquet(labelPath)
+    val labelData = setLabel(rootpath,watchDay,period,appKey)
 
 
-    val preparedData = newFeat.join(labelData,Seq("tdid"),"left").na.fill(1.0,Array("label"))
+    val preparedData = featData.join(labelData,Seq("tdid"),"left").na.fill(1.0,Array("label")).dropDuplicates()
     println(preparedData.printSchema)
     //  Array(tdid, platform, brand, osStandardVersion, tMean, tMax, tMin, tVar, fMean, fMax, fMin, fVar, fSum, fPeriodActive, fDayActive, tNearUseDiff, tAliveTime, tStay, fException)
-    val trainData = preparedData.select("osStandardVersion","tMean","tMax","tVar","fMean","fMax","fVar","fSum","fPeriodActive","fDayActive","tNearUseDiff","tAliveTime","tStay","fException","label").map{row =>
-
+    val trainData = preparedData.select("tdid","tMean","tMax","tVar","fMean","fMax","fVar","fSum","fPeriodActive","fDayActive","tNearUseDiff","tAliveTime","tStay","fException","label").map{row =>
+      val tdid = row.getString(0)
       val label =row.getDouble(row.length-1);
-      val features = Array(row.getDouble(0),row.getDouble(1),row.getDouble(2),row.getDouble(3),row.getDouble(4),row.getDouble(5),row.getDouble(6),row.getDouble(7),row.getDouble(8),row.getDouble(9),row.getDouble(10),row.getDouble(11),row.getDouble(12),row.getDouble(13));
-      (Vectors.dense(features),label)}.toDF("features","label")
+      val features = Array(row.getDouble(1),row.getDouble(2),row.getDouble(3),row.getDouble(4),row.getDouble(5),row.getDouble(6),row.getDouble(7),row.getDouble(8),row.getDouble(9),row.getDouble(10),row.getDouble(11),row.getDouble(12),row.getDouble(13));
+      (tdid,Vectors.dense(features),label)}.toDF("features","label")
     val positiveSample = trainData.filter("label = 1.0")
     val negativeSample = trainData.filter("label = 0.0").sample(false,ratio) // 0.0-1.0
     // val negativeSample = trainData.filter("label = 0.0")
@@ -111,27 +116,40 @@ object getPredict {
 
   }
 
-  def setLabel(sqlContext :org.apache.spark.sql.SQLContext,datainput:String,startDayStr:String,endDayStr:String,labelpath:String) : org.apache.spark.sql.DataFrame = {
-    // val startDayStr ="2017-05-01"
-    // val endDayStr ="2017-05-07"
-    // val labelpath="/datalab/user/frank.zhang/data/label"
-    // val datainput="/datalab/user/jiesheng.ye/data/zhixian.zheng.new/2017/05/*/"
+  def setLabel(rootpath:String,watchDay:String,period : Integer,appKey : String) : org.apache.spark.sql.DataFrame = {
+    /**
+      * val watchDay ="2017/05/01"
+      * val period = 7
+      * val labelpath="/datalab/user/frank.zhang/data/label"
+      * val rootpath="/datalab/user/frank.zhang/data/"
+      *
+      * */
     import sqlContext.implicits._
 
-    val monthDF = sqlContext.read.parquet(datainput)
-    val  fmt:SimpleDateFormat = new java.text.SimpleDateFormat("yyyy-MM-dd")
-    val startDay =new java.sql.Date(fmt.parse(startDayStr).getTime())
-    val endDay =new java.sql.Date(fmt.parse(endDayStr).getTime())
+    val baseday = fmt.parse(watchDay)
+    val tmpPath = rootpath + watchDay
+    var perioddata = getPredict.loadData(sqlContext,tmpPath).filter("appKey = '%s' ".format(appKey)) // variable!!! cost 1 afternoon and 1 night.
+    // println(perioddata.count)
+    for (iday <- 1 to period-1){
+      val day = DateUtils.addDays(baseday,iday)
+      val dayStr = fmt.format(day)
+      val dayPath = rootpath + dayStr
+      val dayData = getPredict.loadData(sqlContext,dayPath).filter("appKey = '%s' ".format(appKey))
+      // println(dayPath)
+      // println(dayData.count)
+      // dayData.show(3)
+      perioddata = perioddata.unionAll(dayData)
+      // println(perioddata.count)
 
-    val dataDF = monthDF.filter($"receiveTime".between(startDay,endDay)).select("tdid").distinct
+    }
     //effective id  label =0
-    val resDF = dataDF.rdd.map(row =>(row.getString(0),0.0)).toDF("tdid","label")
+    val resDF = perioddata.rdd.map(row =>(row.getString(0),0.0)).toDF("tdid","label")
     // resDF.write.format("parquet").save(labelpath)
 
     resDF
   }
 
-  def modelReport(sc:SparkContext,predictionAndLabels:org.apache.spark.rdd.RDD[(Double,Double)]) = {
+  def modelReport(predictionAndLabels:org.apache.spark.rdd.RDD[(Double,Double)]) = {
     import org.apache.spark.mllib.evaluation.MulticlassMetrics
     import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
     // AUC
@@ -155,7 +173,7 @@ object getPredict {
     sc.parallelize(Array(auROC,precision,recall)).repartition(1).saveAsTextFile("/datalab/user/frank.zhang/data/result/"+System.currentTimeMillis().toString)
 
   }
-  def RFModel(sc:SparkContext,training :org.apache.spark.sql.DataFrame,numTree :Integer,treeDepth : Integer) = {
+  def RFModel(training :org.apache.spark.sql.DataFrame,numTree :Integer,treeDepth : Integer) = {
 
 
     // Index labels, adding metadata to the label column.
@@ -207,7 +225,7 @@ object getPredict {
     // Select example rows to display.
     // predictions.select("predictedLabel", "label", "features").show(5)
     val predictionAndLabels= predictions.select("predictedLabel", "label").map(row=>(row.getString(0).toDouble,row.getDouble(1)))
-    modelReport(sc,predictionAndLabels)
+    modelReport(predictionAndLabels)
 
     val rfModel = model.stages(2).asInstanceOf[RandomForestClassificationModel]
     rfModel

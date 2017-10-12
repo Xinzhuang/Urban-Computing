@@ -14,7 +14,7 @@ import java.sql.Date
 import java.util.Date;
 import org.apache.spark.sql.types._
 import org.apache.spark._
-
+import org.apache.commons.lang3.time.DateUtils
 import org.apache.spark.ml.classification.LogisticRegression
 import org.apache.spark.ml.param.ParamMap
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
@@ -24,7 +24,17 @@ import org.apache.spark.sql.Row
 import org.apache.spark.{SparkConf, SparkContext}
 
 object getFeature3 {
+  //init the spark
+  val conf = new SparkConf()
+    .setMaster("yarn-cluster")
+    .setAppName("feature data")
+    .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+  val sc = new SparkContext(conf)
+  sc.setLogLevel("WARN")
+  val sqlContext = new org.apache.spark.sql.SQLContext(sc)
+
   val fmt: SimpleDateFormat = new java.text.SimpleDateFormat("yyyy/MM/dd")
+
   def main(args: Array[String]):Unit = {
     /* *
     *args(0): startDay,"2017/07/ -/"
@@ -34,48 +44,35 @@ object getFeature3 {
     * val appKey = "323BE90BCA2213A07D18FE935A6BA9E5"
 
     *读取app名称
-      *[52F459D41AAB85846D4CA031B40FFECE,360手机助手]
+    *[52F459D41AAB85846D4CA031B40FFECE,360手机助手]
     *[C365D790EDFCDC1C734F1272496C87D5,墨迹天气iOS]
     *[323BE90BCA2213A07D18FE935A6BA9E5,墨迹天气Android]
     *[86C480859A2547CB85FB0BC5A6EC3943,秒拍]
     */
 
-
-    //init the spark
-    val conf = new SparkConf()
-      .setMaster("yarn-cluster")
-      .setAppName("feature data")
-      .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-    val sc = new SparkContext(conf)
-    sc.setLogLevel("WARN")
-    val sqlContext = new org.apache.spark.sql.SQLContext(sc)
     import sqlContext.implicits._
     val rootpath = args(0)
     val watchDay = args(1)
     val period = args(2).toInt
+    val numTree = args(3).toInt
+    val treeDepth = args(4).toInt
 
     val appKey = "323BE90BCA2213A07D18FE935A6BA9E5"
-    val appdf =loadPeriodData(rootpath,watchDay,period,appKey,sqlContext)
-    val datadf = getActionFeatures(appdf,period,2.0,watchDay,sqlContext).repartition(6)
+    val appdf =loadPeriodData(rootpath,watchDay,period,appKey)
+    val datadf = getFeature3.getActionFeatures(appdf,period,2.0,watchDay).repartition(6)
 
     sc.parallelize(Array(datadf.count)).repartition(1).saveAsTextFile("/datalab/user/frank.zhang/data/result/tmp"+System.currentTimeMillis().toString)
     val outpath = "/datalab/user/frank.zhang/data/feature/action/"+watchDay+"-14"
     saveData(datadf,outpath)
+    // 2-training phase
     val actionPath = outpath
-    val appSavePath = args(1)
-    val labelPath = args(2)
-    val numTree = args(3).toInt
-    val treeDepth = args(4).toInt
-    val training = getPredict.getTrainData(sqlContext,actionPath,appSavePath,labelPath)
-    getPredict.RFModel(sc,training,numTree,treeDepth)
+    val labelperiod = 7
+    val training = getPredict.getTrainData(actionPath,rootpath,watchDay,labelperiod,appKey,0.5)
+    getPredict.RFModel(training,numTree,treeDepth)
   }
-  /*
-/
-*/
-  // val pqt = sqlContext.read.parquet(output)
-  // pqt.printSchema
-  // delete files
+
   def deleteFile(path: String) : Unit = {
+    // delete files
     import org.apache.hadoop.conf.Configuration
     import org.apache.hadoop.fs.{FileSystem, Path}
     val hdfs : FileSystem = FileSystem.get(new Configuration)
@@ -100,20 +97,18 @@ object getFeature3 {
     df.write.format("parquet").save(path)
   }
   // load DataFrame format data from paequet files
-  def loadData(sqlContext:org.apache.spark.sql.SQLContext,readPath: String):org.apache.spark.sql.DataFrame ={
+  def loadData(readPath: String):org.apache.spark.sql.DataFrame ={
     val df = sqlContext.read.parquet(readPath)
     df
   }
-  def loadPeriodData(rootpath : String,watchDay : String,period : Integer,appKey : String,sqlContext:org.apache.spark.sql.SQLContext) = {
-    /*
-    * val rootpath = "/datalab/user/frank.zhang/data/"
-    * val  watchDay = "2017/09/01"
-     */
+  def loadPeriodData(rootpath : String,watchDay : String,period : Integer,appKey : String) = {
+    /**
+      * val rootpath = "/datalab/user/frank.zhang/data/"
+      * val  watchDay = "2017/09/01"
+      */
 
-    import org.apache.commons.lang3.time.DateUtils
+
     import sqlContext.implicits._
-    val  fmt:SimpleDateFormat = new java.text.SimpleDateFormat("yyyy/MM/dd")
-
     // val rootpath = "/datalab/user/frank.zhang/data/"
     // val watchDay = "2017/09/01"
 
@@ -138,12 +133,10 @@ object getFeature3 {
   }
   /*
   * get features of month data*/
-  def getActionFeatures(df:org.apache.spark.sql.DataFrame,period: Integer,sumBound: Double,watchDay:String,sqlContext:org.apache.spark.sql.SQLContext) = {
+  def getActionFeatures(df:org.apache.spark.sql.DataFrame,period: Integer,sumBound: Double,watchDay:String) = {
     // 30 days data
     //Need :[tdid: string, appKey: string, receiveTime: date, platform: int, installTime: date, purchaseTime: date, brand: string, osStandardVersion: string, freq: int]
-    import org.apache.spark.util.StatCounter
     import sqlContext.implicits._
-    val  fmt:SimpleDateFormat = new java.text.SimpleDateFormat("yyyy/MM/dd")
     import org.apache.spark.util.StatCounter
     import scala.util.matching.Regex
     val getOSVer =udf[Double,String]{str =>
@@ -219,9 +212,35 @@ object getFeature3 {
 
     val selectDF = monthDF.select("tdid","installTime","standardModel").dropDuplicates()
     val featureTmpDF=aggregatedDF.join(selectDF,Seq("tdid"),"left").dropDuplicates()
-    val featureDF = featureTmpDF.withColumn("tAliveTime",datediff($"tNearUseDay",$"installTime").cast(DoubleType)).drop("tNearUseDay").drop("installTime")
+    val featureDF = featureTmpDF.withColumn("tAliveTime",datediff($"tNearUseDay",$"installTime").cast(DoubleType)).drop("tNearUseDay").drop("installTime").filter("tAliveTime >%s".format(7))
     //tdid: string, appKey: string, receiveTime: date, platform: int, installTime: date, purchaseTime: date, brand: string, osStandardVersion: string, payAmount: double, freq: bigint, tMean: double, tMax: double, tMin: double, tVar: double, fMean: double, fMax: double, fMin: double, fVar: double, fSum: double, fdayMean: double, tNearUseDiff: double, tNearUseDay: date, tAliveTime: int
     // mergeFeagure.select("tdid","osStandardVersion","tMean","tMax","tMin","tVar","fMean","fMax","fMin","fVar","fSum","fPeriodActive","fDayActive","tNearUseDiff","tAliveTime")
     featureDF
+  }
+  def mergeFeatures(actionPath : String,appPath : String,savePath : String) : org.apache.spark.sql.DataFrame = {
+    /**
+      * Merge the features (action,device,app)
+      * deal with missing values
+      */
+    import sqlContext.implicits._
+    val actionInfo = sqlContext.read.parquet(actionPath).drop("fMin").drop("tMin")
+    // rawDF: org.apache.spark.sql.DataFrame = [tdid: string, appKey: string, receiveTime: date, platform: int, installTime: date, purchaseTime: date, brand: string, osStandardVersion: string, payAmount: double, freq: bigint]
+    val devicePath = "/datalab/user/frank.zhang/data/deviceinfo"
+    val deviceInfo = sqlContext.read.parquet(devicePath)
+    val appInfo = getPredict.loadData(sqlContext,appPath)
+    // val merge1 =  actionInfo.join(deviceInfo,$"standardModel" === $"standard_model","left").drop("standardModel").drop("standard_model").distinct()
+    val mergeDF1 = actionInfo.join(appInfo,Seq("tdid"),"left").na.drop()
+    //[standard_model: string, price_range: double, hardware_type: double, network_type: double, RAM: string]
+    val mergeDF2 = mergeDF1.join(deviceInfo,$"standardModel" === $"standard_model","left").na.drop
+    // val featDF = getFeatures2(monthDF,30.0,1.0,"2017/05/01")
+    //featDF:("tdid","tMean","tMax","tMin","tVar","fMean","fMax","fMin","fVar","fSum","fdayMean","nearUseDiff")
+    // val initInstallPath ="/datalab/user/frank.zhang/data/feature/initapp2dfreq"
+    // val initInstallDF = sqlContext.read.parquet(initInstallPath)
+    // val featAll = merge1.join(initInstallDF,Seq("tdid"),"left").na.fill(2.0,Array("initUsefreq"))
+    val toDouble = udf[Double, String]( _.toDouble)
+    // val featAllDF = featAll.withColumn("initUsefreq",toDouble($"initUsefreq"))
+    // featAllDF.write.format("parquet").save(savePath)
+    mergeDF2
+
   }
 }
